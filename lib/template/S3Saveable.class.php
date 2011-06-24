@@ -51,7 +51,7 @@ class S3Saveable extends Doctrine_Template
         'default' => false,
     ));
 
-    $this->addListener(new adhS3SaveableListener($this->_options));
+    $this->addListener(new S3SaveableListener($this->_options));
   }
 
   /**
