@@ -457,4 +457,9 @@ class S3Saveable extends Doctrine_Template
 
     return $invoker;
   }
+
+  public function getPublicUrl($https=false) {
+    $invoker = $this->getInvoker();
+    return ($https ? 'https' : 'http') . '://s3.amazonaws.com/' . $this->getAppConfig('s3_bucket') . '/' . $invoker[$this->getColumn('path')];
+  }
 }
