@@ -12,15 +12,15 @@ class S3Saveable extends Doctrine_Template
     's3_secret_key_config_key'    => 's3_secret_key',
     's3_bucket_config_key'        => 's3_bucket',
 
-    'ignore_original_extension'   => false, // test
-    'do_guess_extension'          => true,  // test
-    'force_extension'             => false, // test
+    'ignore_original_extension'   => false,
+    'do_guess_extension'          => true,
+    'force_extension'             => false,
 
     'delete_local_on_save'        => false,
 
     's3_dir'                      => false,
     's3_base_filename'            => false,
-    's3_acl'                      => S3::ACL_PUBLIC_READ, // test
+    's3_acl'                      => S3::ACL_PUBLIC_READ,
 
     'generate_random_filename'    => true,
     'ensure_unique_local'         => true,
@@ -54,7 +54,11 @@ class S3Saveable extends Doctrine_Template
     $this->addListener(new adhS3SaveableListener($this->_options));
   }
 
-
+  /**
+   * Instantiate S3 singleton
+   *
+   * @return S3 the instance
+   */
   protected function initializeS3() {
     if(false === (self::$s3_instance instanceof S3)) {
       self::$s3_instance = new S3($this->getAppConfig('s3_access_key'), $this->getAppConfig('s3_secret_key'));
@@ -63,20 +67,34 @@ class S3Saveable extends Doctrine_Template
     return self::$s3_instance;
   }
 
+  /**
+   * Get app.yml config for one of $_options['*_config_key']
+   *
+   * @param string $type Like 's3_access_key'
+   * @throws S3SaveableException when key wasn't set or is falsey
+   * @return string The param value
+   */
   protected function getAppConfig($type) {
     $key = $this->_options[$type.'_config_key'];
 
     if (false === ($val = sfConfig::get('app_'.$key, false))) {
-      throw new S3Exception("Could not find configuration key in app.yml ({$type}_config_key => {$key})");
+      throw new S3SaveableException("Could not find configuration key in app.yml ({$type}_config_key => {$key})");
     }
     
     return $val;
   }
 
+  /**
+   * Get the MySQL column name from configuration
+   * 
+   * @param string $key The $_options['columns'] key
+   * @throws S3SaveableException when column wasn't set or was empty in $_options
+   * @return string The column name
+   */
   protected function getColumn($key) {
     $column = $this->_options['columns'][$key];
     if(empty($column)) {
-      throw new S3Exception("No column name given for {$column}");
+      throw new S3SaveableException("No column name given for {$column}");
     }
 
     return $column;
@@ -84,6 +102,15 @@ class S3Saveable extends Doctrine_Template
 
 
 
+  /**
+   * Initialize the S3 upload with a local file path to be saved when
+   * Doctrine_Record::save() is called. This will only affect inserts, not updates.
+   *
+   * @param string $filename Absolute path to local file
+   * @param array $options Overrides any default options
+   * @throws S3Exception when validator throws sfValidatorError (this should never happen)
+   * @return Doctrine_Record
+   */
   public function fromLocalPath($filename, array $options=null) {
     if($options) {
       $this->_options = Doctrine_Lib::arrayDeepMerge($this->_options, $options);
@@ -111,6 +138,15 @@ class S3Saveable extends Doctrine_Template
     return $this->fromValidatedFile($file);
   }
 
+  /**
+   * Initialize the S3 upload with an sfValidatedFile (returned from the sfValidatorFile
+   * object in doClean) to be saved when Doctrine_Record::save() is called. This
+   * will only affect inserts, not updates.
+   *
+   * @param sfValidatedFile $file
+   * @param array $options Overrides any default options
+   * @return Doctrine_Record
+   */
   public function fromValidatedFile(sfValidatedFile $file, array $options=null) {
     if($options) {
       Doctrine_Lib::arrayDeepMerge($this->_options, $options);
@@ -123,6 +159,13 @@ class S3Saveable extends Doctrine_Template
 
 
 
+  /**
+   * Even though this is public, this should not be called directly. Use
+   * {@see fromLocalPath()} or {@see fromValidatedFile()}.
+   *
+   * @throws S3Exception on S3 PUT failure
+   * @return Doctrine_Record
+   */
   public function putObject() {
     if(false === $this->file instanceof sfValidatedFile) {
       return false;
@@ -132,7 +175,7 @@ class S3Saveable extends Doctrine_Template
     $invoker = $this->getInvoker();
 
     $path_original = $this->file->getTempName();
-    $path_s3 = $this->determineS3Path();
+    $path_s3 = $this->buildS3Uri();
 
     $success = S3::putObject(
       S3::inputFile($path_original),
@@ -155,7 +198,16 @@ class S3Saveable extends Doctrine_Template
     return $invoker;
   }
 
-  protected function determineS3Path() {
+  /**
+   * Build the S3 URI from options. If `s3_base_filename` wasn't provided and
+   * `generate_random_filename` is not false, tries generating a random, unique
+   * filename (@see self::getRandomFilename).
+   *
+   * @throws S3Exception when custom s3_base_filename was given, wasn't unique, and randomly generated filename isn't allowed by configuration
+   * @throws S3SaveableException when a unique filename couldn't be generated in 10 attempts
+   * @return string The S3 URI
+   */
+  protected function buildS3Uri() {
     $dir = $this->_options['s3_dir'] ? $this->_options['s3_dir'] : '';
     $base_filename = $this->_options['s3_base_filename'];
     $extension = $this->determineExtension();
@@ -163,7 +215,7 @@ class S3Saveable extends Doctrine_Template
     $custom_path = self::getPathFromParts($dir, $base_filename, $extension);
     if($base_filename && $this->isUniquePath($custom_path)) {
       return $custom_path;
-    } elseif(false === $this->_options['generate_random_filename']) {
+    } elseif($this->_options['generate_random_filename'] === false) {
       $e_msg = 'Custom filename was required and ' . ($base_filename ? 'is not unique' : 'was not provided');
       throw new S3Exception($e_msg);
     }
@@ -175,20 +227,29 @@ class S3Saveable extends Doctrine_Template
       $path = self::getPathFromParts($dir, $base_filename, $extension);
 
       if($tries === 10) {
-        throw new S3Exception('Could not find random unique filename after 10 tries');
+        throw new S3SaveableException('Could not find random unique filename after 10 tries');
       }
       ++$tries;
-    } while(false === $this->isUniquePath($path));
+    } while($this->isUniquePath($path) === false);
 
     return $path;
   }
 
+  /**
+   * Figure out the extension that's going to be used for the S3 URI. Checks for
+   * the 'force_extension' option, which overrides everything. Then tries using
+   * the original file's extension and, failing that, tries guessing from the file's
+   * MIME type (@see sfValidatedFile).
+   *
+   * @return string The file extension, with a dot.
+   */
   protected function determineExtension() {
     $extension = '';
 
     if($this->_options['force_extension'] != false) {
       $extension = $this->_options['force_extension'];
-    } elseif(($extension_orig = $this->file->getOriginalExtension(false)) && false == $this->_options['ignore_original_extension']) {
+      if(substr($extension, 0, 1) !== '.') $extension = '.'.$extension;
+    } elseif(($extension_orig = $this->file->getOriginalExtension(false)) && $this->_options['ignore_original_extension'] == false) {
       $extension = $extension_orig;
     } elseif($this->_options['do_guess_extension']) {
       $extension = $this->file->getExtension('');
@@ -197,10 +258,22 @@ class S3Saveable extends Doctrine_Template
     return $extension;
   }
 
+  /**
+   * Checks if the given path does not exist in the S3 bucket
+   *
+   * @param string $path The proposed S3 URI
+   * @return boolean
+   */
   protected function isUniquePathRemote($path) {
     return false === S3::getObjectInfo($this->getAppConfig('s3_bucket'), $path, false);
   }
 
+  /**
+   * Checks if the given path does not exist in the 'path' column in the database.
+   *
+   * @param string $path The proposed S3 URI
+   * @return boolean
+   */
   protected function isUniquePathLocal($path) {
     $count = $this->getTable()
       ->createQuery('s')
@@ -210,6 +283,15 @@ class S3Saveable extends Doctrine_Template
     return $count === 0;
   }
 
+  /**
+   * Determines from the settings the S3 URI uniqueness criteria, and calls one or
+   * both of the methods that check for uniqueness.
+   *
+   * @see self::isUniquePathLocal
+   * @see self::isUniquePathRemote
+   * @param <type> $path The proposed S3 URI
+   * @return boolean True if S3 URI is unique, depending on settings
+   */
   protected function isUniquePath($path) {
     if($this->_options['ensure_unique_local'] && false === $this->isUniquePathLocal($path)) {
       return false;
@@ -222,10 +304,28 @@ class S3Saveable extends Doctrine_Template
     return true;
   }
 
+  /**
+   * Builds a path from given directory, base filename, and extension. Leading slash
+   * is always removed from directory (S3 doesn't want it)
+   * 
+   * @param string $dir Directory (leading and trailing slashes don't matter)
+   * @param string $base_filename Filename without extension
+   * @param string $extension
+   * @return string
+   */
   protected static function getPathFromParts($dir, $base_filename, $extension) {
     return self::normalizeDir($dir, false, true) . $base_filename . $extension;
   }
 
+  /**
+   * The the leading and trailing slashes figured out
+   *
+   * @param string $dir The path to normalize
+   * @param boolean $leading True adds/keeps the leading slash, false removes it
+   * @param boolean $trailing True adds/keeps the trailing slash, false removes it
+   * @param boolean $slash_if_empty If $dir was empty, return a slash?
+   * @return string 
+   */
   protected static function normalizeDir($dir, $leading=true, $trailing=false, $slash_if_empty=false)
   {
     $dir = trim($dir, '\\/');
@@ -247,8 +347,10 @@ class S3Saveable extends Doctrine_Template
 
   /**
    * S3 doesn't support move ops, so copy to new path and delete the old one.
-   * 
-   * @return <type> 
+   *
+   * @throws S3SaveableException on empty or non-unique path
+   * @throws S3Exception on S3 copy or delete failure
+   * @return Doctrine_Record
    */
   public function moveObject() {
     $invoker = $this->getInvoker();
@@ -270,11 +372,11 @@ class S3Saveable extends Doctrine_Template
     $bucket = $this->getAppConfig('s3_bucket');
 
     if(empty($new_path)) {
-      throw new S3Exception("New value for {$path_column} cannot be empty");
+      throw new S3SaveableException("New value for {$path_column} cannot be empty");
     }
 
     if(false === $this->isUniquePath($invoker[$this->getColumn('path')])) {
-      throw new S3Exception('New S3 path was not unique');
+      throw new S3SaveableException('New S3 path was not unique');
     }
 
     // copy to new path
@@ -295,6 +397,12 @@ class S3Saveable extends Doctrine_Template
     return $invoker;
   }
 
+  /**
+   * Delete the object from the invoker's S3 URI column
+   * 
+   * @return Doctrine_Record
+   * @throws S3Exception if S3 DELETE fails
+   */
   public function deleteObject() {
     $this->initializeS3();
     $invoker = $this->getInvoker();
@@ -307,7 +415,7 @@ class S3Saveable extends Doctrine_Template
     }
 
     if(false === S3::deleteObject($bucket, $path)) {
-      throw new S3Exception("Could not delete S3 object ({$bucket}\{$path})");
+      throw new S3Exception("S3 DELETE failed: could not delete S3 object ({$bucket}\{$path})");
     }
 
     $invoker[$this->getColumn('is_deleted')] = true;
@@ -315,6 +423,15 @@ class S3Saveable extends Doctrine_Template
     return $invoker;
   }
 
+  /**
+   * Download the S3 object from this record's S3 URI column to $path.
+   *
+   * @param string $path
+   * @param boolean $overwrite If the file exists, overwrite it if true
+   * @return Doctrine_Record
+   * @throws S3SaveableException if directory or file is not writable, or when file exists and $overwrite is false
+   * @throws S3Exception on S3 GET failure
+   */
   public function downloadTo($path, $overwrite=false) {
     $invoker = $this->getInvoker();
     $this->initializeS3();
@@ -323,18 +440,20 @@ class S3Saveable extends Doctrine_Template
     $path = basename($path);
 
     if(false === is_writable($dir)) {
-      throw new S3Exception('Directory is not writable');
+      throw new S3SaveableException('Directory is not writable');
     }
 
     if(file_exists($path)) {
       if(false == $overwrite) {
-        throw new S3Exception('File already exists at this location');
+        throw new S3SaveableException('File already exists at this location');
       } elseif(false === is_writable($path)) {
-        throw new S3Exception('File to overwrite is not writable');
+        throw new S3SaveableException('File to overwrite is not writable');
       }
     }
 
-    S3::getObject($this->getAppConfig('s3_bucket'), $invoker[$this->getColumn('path')], $path);
+    if(false === S3::getObject($this->getAppConfig('s3_bucket'), $invoker[$this->getColumn('path')], $path)) {
+      throw new S3Exception('S3 GET failed');
+    }
 
     return $invoker;
   }
