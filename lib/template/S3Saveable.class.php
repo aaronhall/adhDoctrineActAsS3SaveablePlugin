@@ -458,8 +458,34 @@ class S3Saveable extends Doctrine_Template
     return $invoker;
   }
 
+  /**
+   * Get the public, non-autenticated URL
+   * 
+   * @param boolean $https
+   * @return string the S3 object's URL
+   */
   public function getPublicUrl($https=false) {
     $invoker = $this->getInvoker();
     return ($https ? 'https' : 'http') . '://s3.amazonaws.com/' . $this->getAppConfig('s3_bucket') . '/' . $invoker[$this->getColumn('path')];
+  }
+
+  /**
+   * Get the authenticated URL
+   *
+   * @param integer $lifetime The lifetime of the URL in seconds
+   * @param string $host_bucket {@see S3::getAuthenticatedUrl)
+   * @param boolean $https
+   * @return string the S3 object's URL
+   */
+  public function getAuthenticatedUrl($lifetime, $host_bucket=false, $https=false) {
+    $invoker = $this->getInvoker();
+
+    if($path = $invoker[$this->getColumn('path')]) {
+      $this->initializeS3();
+
+      S3::getAuthenticatedURL($this->getAppConfig('s3_bucket'), $path, $lifetime, $host_bucket, $https);
+    } else {
+      return false;
+    }
   }
 }
